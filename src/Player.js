@@ -12,8 +12,6 @@ import noop from 'lodash/noop';
 
 const RCTAudioPlayer = NativeModules.AudioPlayer;
 
-let playerId = 0;
-
 export const PlaybackCategories = {
   Playback: 1,
   Ambient: 2,
@@ -32,7 +30,7 @@ const defaultPlayerOptions = {
  * @constructor
  */
 class Player extends EventEmitter {
-  constructor(path, options = defaultPlayerOptions) {
+  constructor(playerId,path, options = defaultPlayerOptions) {
     super();
 
     this._path = path;
@@ -52,14 +50,14 @@ class Player extends EventEmitter {
 
       this._options = options;
     }
-
-    this._playerId = playerId++;
+    this._playerId=playerId;
+    //reset jika kosong
     this._reset();
 
     const appEventEmitter = Platform.OS === 'ios' ? NativeAppEventEmitter : DeviceEventEmitter;
 
-    appEventEmitter.addListener(`RCTAudioPlayerEvent:${this._playerId}`, (payload: Event) => {
-      this._handleEvent(payload.event, payload.data);
+    appEventEmitter.addListener(`RCTAudioPlayerEvent:${playerId}`, (payload) => {
+      this._handleEvent(payload.playerId,payload.event, payload.data);
     });
   }
 
@@ -70,7 +68,9 @@ class Player extends EventEmitter {
     this._speed = 1.0;
     this._wakeLock = false;
     this._duration = -1;
+    this._durationReadable = "";
     this._position = -1;
+    this._positionReadable = "";
     this._lastSync = -1;
     this._looping = false;
   }
@@ -81,7 +81,9 @@ class Player extends EventEmitter {
     }
 
     this._duration = info.duration;
+    this._durationReadable = info.durationReadable;
     this._position = info.position;
+    this._positionReadable=info.positionReadable
     this._lastSync = Date.now();
   }
 
@@ -97,15 +99,24 @@ class Player extends EventEmitter {
     this._storeInfo(info);
   }
 
-  _handleEvent(event, data) {
-    // console.log('event: ' + event + ', data: ' + JSON.stringify(data));
+  _handleEvent(playerId,event, data) {
+    const payload={
+      playerId:playerId,
+      event:event,
+      data:data
+    };
     switch (event) {
+      case 'interval':
+        //console.log('Player.js playerId: ' +playerId+',event: ' + event + ', data: ' + JSON.stringify(data));
+        this.emit(event,payload);
+        break;
       case 'progress':
         // TODO
         break;
       case 'ended':
         this._updateState(null, MediaStates.PREPARED);
         this._position = -1;
+        this.emit(event, payload);
         break;
       case 'info':
         // TODO
@@ -126,24 +137,29 @@ class Player extends EventEmitter {
         this._lastSync = Date.now();
         break;
     }
-
-    this.emit(event, data);
   }
 
-  prepare(callback = noop) {
+  prepare(playerId,callback = noop) {
     this._updateState(null, MediaStates.PREPARING);
 
     const tasks = [];
-
+    const payload={
+      playerId:playerId,
+      event:'stateloading',
+      data:'sedang memuat'
+    };
+    
     // Prepare player
     tasks.push((next) => {
-      RCTAudioPlayer.prepare(this._playerId, this._path, this._options, next);
+      this.emit('stateloading', payload);
+      RCTAudioPlayer.prepare(playerId, this._path, this._options, next);
+      this.emit('stateloading', payload);
     });
-
     // Set initial values for player options
     tasks.push((next) => {
+      this.emit('stateloading', payload);
       RCTAudioPlayer.set(
-        this._playerId,
+        playerId,
         {
           volume: this._volume,
           pan: this._pan,
@@ -153,6 +169,7 @@ class Player extends EventEmitter {
         },
         next,
       );
+      this.emit('stateloading', payload);
     });
 
     async.series(tasks, (err, results) => {
@@ -163,19 +180,23 @@ class Player extends EventEmitter {
     return this;
   }
 
-  play(callback = noop) {
+  play(playerId,callback = noop) {
     const tasks = [];
-
-    // Make sure player is prepared
-    if (this._state === MediaStates.IDLE) {
-      tasks.push((next) => {
-        this.prepare(next);
-      });
-    }
-
+    const payload={
+      playerId:playerId,
+      event:'stateloading',
+      data:'sedang memuat'
+    };
+    const payload_play={
+      playerId:playerId,
+      event:'stateloading',
+      data:'sedang memutar'
+    };
     // Start playback
     tasks.push((next) => {
-      RCTAudioPlayer.play(this._playerId, next);
+      this.emit('stateloading', payload);
+      RCTAudioPlayer.play(playerId, next);
+      this.emit('stateloading', payload_play);
     });
 
     async.series(tasks, (err, results) => {
@@ -186,8 +207,8 @@ class Player extends EventEmitter {
     return this;
   }
 
-  pause(callback = noop) {
-    RCTAudioPlayer.pause(this._playerId, (err, results) => {
+  pause(playerId,callback = noop) {
+    RCTAudioPlayer.pause(playerId, (err, results) => {
       // Android emits a pause event on the native side
       if (Platform.OS === 'ios') {
         this._updateState(err, MediaStates.PAUSED, [results]);
@@ -212,8 +233,8 @@ class Player extends EventEmitter {
     return this;
   }
 
-  stop(callback = noop) {
-    RCTAudioPlayer.stop(this._playerId, (err, results) => {
+  stop(playerId,callback = noop) {
+    RCTAudioPlayer.stop(playerId, (err, results) => {
       this._updateState(err, MediaStates.PREPARED);
       this._position = -1;
       callback(err);
@@ -222,19 +243,19 @@ class Player extends EventEmitter {
     return this;
   }
 
-  destroy(callback = noop) {
+  destroy(playerId,callback = noop) {
     this._reset();
-    RCTAudioPlayer.destroy(this._playerId, callback);
+    RCTAudioPlayer.destroy(playerId, callback);
   }
 
-  seek(position = 0, callback = noop) {
+  seek(playerId,position = 0, callback = noop) {
     // Store old state, but not if it was already SEEKING
     if (this._state != MediaStates.SEEKING) {
       this._preSeekState = this._state;
     }
 
     this._updateState(null, MediaStates.SEEKING);
-    RCTAudioPlayer.seek(this._playerId, position, (err, results) => {
+    RCTAudioPlayer.seek(playerId, position, (err, results) => {
       if (err && err.err === 'seekfail') {
         // Seek operation was cancelled; ignore
         return;
@@ -247,13 +268,13 @@ class Player extends EventEmitter {
 
   _setIfInitialized(options, callback = noop) {
     if (this._state >= MediaStates.PREPARED) {
-      RCTAudioPlayer.set(this._playerId, options, callback);
+      RCTAudioPlayer.set(_playerId, options, callback);
     }
   }
 
   set volume(value) {
     this._volume = value;
-    this._setIfInitialized({ volume: value });
+    this._setIfInitialized(_playerId,{ volume: value });
   }
 
   set currentTime(value) {
@@ -277,7 +298,7 @@ class Player extends EventEmitter {
 
   get currentTime() {
     // Queue up an async call to get an accurate current time
-    RCTAudioPlayer.getCurrentTime(this._playerId, (err, results) => {
+    RCTAudioPlayer.getCurrentTime(_playerId, (err, results) => {
       this._storeInfo(results);
     });
 
@@ -294,7 +315,9 @@ class Player extends EventEmitter {
 
     return this._position;
   }
-
+  get positionReadable(){
+    return this._positionReadable;
+  }
   get volume() {
     return this._volume;
   }
@@ -303,6 +326,9 @@ class Player extends EventEmitter {
   }
   get duration() {
     return this._duration;
+  }
+  get durationReadable() {
+    return this._durationReadable;
   }
   get speed() {
     return this._speed;
